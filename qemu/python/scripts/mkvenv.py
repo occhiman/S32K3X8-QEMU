@@ -612,7 +612,7 @@ def pip_install(
     if not online:
         full_args += ["--no-index"]
     if wheels_dir:
-        full_args += ["--find-links", f"file://{str(wheels_dir)}"]
+        full_args += ["--find-links", str(Path(wheels_dir).resolve().as_uri())]
     full_args += list(args)
     subprocess.run(
         full_args,

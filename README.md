@@ -60,6 +60,99 @@
           ```
           *(You should see `s32k3x8evb` or a similar name in the output list.)*
 
+  ## MSYS2 (Windows) Findings and Workarounds
+  These are the known-good findings/workarounds validated for this repository on Windows:
+  * Source tree: `C:/Users/ochiman/git-repos/S32K3X8-QEMU/qemu`
+  * Target: `arm-softmmu`
+  * Shell: MSYS2 `MINGW64`
+
+  1. **Install prerequisites in MINGW64**
+      ```bash
+      pacman -Syu
+      pacman -S --needed \
+        base-devel git \
+        mingw-w64-x86_64-toolchain \
+        mingw-w64-x86_64-python \
+        mingw-w64-x86_64-python-pip \
+        mingw-w64-x86_64-meson \
+        mingw-w64-x86_64-ninja
+      ```
+
+  2. **Workaround A: `pycotap==1.3.1` + mkvenv wheel URI**
+      * If configure fails in offline mkvenv mode (`mkvenv was configured to operate offline...`), pre-download the wheel:
+      ```bash
+      mkdir -p python/wheels
+      PIP_NO_INDEX=0 /mingw64/bin/python3 -m pip download \
+        --dest python/wheels \
+        --index-url https://pypi.org/simple \
+        pycotap==1.3.1
+      ```
+      * In `qemu/python/scripts/mkvenv.py`, ensure `--find-links` uses a proper Windows file URI:
+      ```python
+      full_args += ["--find-links", str(Path(wheels_dir).resolve().as_uri())]
+      ```
+
+  3. **Workaround B: Windows symlink privilege (`WinError 1314`)**
+      * Preferred: enable Windows Developer Mode and rerun configure.
+      * Alternative: use the fallback behavior in `qemu/scripts/symlink-install-tree.py`:
+      * fall back to copy when symlink privilege is missing
+      * skip missing generated-later sources (for example `trace-events-all`)
+
+  4. **Configure with Windows-style compiler path**
+      * For this tree, avoid passing POSIX compiler path (`/mingw64/bin/gcc`) to `configure`.
+      ```bash
+      GCC_WIN="$(cygpath -m "$(command -v gcc)")"
+      rm -rf build pyvenv
+      ./configure --target-list=arm-softmmu --enable-download --cc="$GCC_WIN"
+      ```
+
+  5. **If configure reports `ERROR: missing subprojects`**
+      ```bash
+      /mingw64/bin/meson subprojects download
+      ./configure --target-list=arm-softmmu --enable-download --cc="$GCC_WIN"
+      ```
+      * If you need an offline build later, first make sure subprojects are downloaded.
+
+  6. **Workaround C: `qemu_ftruncate64` undefined reference in tests**
+      * Root fix (already applied in this repository):
+      * remove `qemu_ftruncate64()` from `qemu/block/file-win32.c`
+      * define `qemu_ftruncate64()` in `qemu/util/oslib-win32.c` so it is linked from `libqemuutil`
+      * Then reconfigure and rebuild:
+      ```bash
+      rm -rf build
+      ./configure --target-list=arm-softmmu --enable-download --cc="$GCC_WIN"
+      ```
+
+  7. **Workaround D: install fails with `dst_dir must be absolute`**
+      * If install resolves to POSIX paths like `/qemu/share/doc`, switch to a Windows absolute prefix:
+      ```bash
+      PREFIX_WIN="$(cygpath -m /mingw64)"
+
+      build/pyvenv/bin/meson configure build \
+        -Dprefix="$PREFIX_WIN" \
+        -Dbindir=bin -Dlibdir=lib -Ddatadir=share \
+        -Ddocdir=share/doc -Dqemu_suffix=qemu \
+        -Dmandir=share/man -Dsysconfdir=etc -Dlocalstatedir=var
+
+      ninja -C build install
+      ```
+
+  8. **Build and install sequence**
+      ```bash
+      ninja -C build qemu-system-arm
+      ninja -C build
+      ninja -C build install
+      ```
+
+  9. **Quick troubleshooting map**
+      * `Could not find pycotap==1.3.1`: pre-download wheel + use `as_uri()` in `mkvenv.py`.
+      * `ERROR: missing subprojects`: run `meson subprojects download` and configure with `--enable-download`.
+      * `Unknown compiler(s): [['/mingw64/bin/gcc', '-m64']]`: pass `--cc="$(cygpath -m "$(command -v gcc)")"`.
+      * `WinError 1314`: enable Developer Mode or use symlink fallback behavior.
+      * `error copying /qemu/share/trace-events-all`: ensure fallback script skips missing sources.
+      * `undefined reference to qemu_ftruncate64`: keep function in `util/oslib-win32.c` (not `block/file-win32.c`), then clean reconfigure.
+      * `dst_dir must be absolute`: set Windows absolute `prefix` and rerun install.
+
   ## Usage
   Follow these steps to build and run the firmware on the emulated board.
 
