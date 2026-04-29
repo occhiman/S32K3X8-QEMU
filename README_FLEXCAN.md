@@ -151,6 +151,11 @@ The model was aligned for MCAL FlexCAN basic flows:
 - `IMASK1`/`IFLAG1` interrupt flow with W1C flag clearing
 - TX complete signaling through MB flags
 - RX delivery from QEMU CAN bus into configured RX-empty mailboxes
+- Internal self-reception/loopback behavior:
+  - `CTRL1[LPB]=1`: transmitted frame is looped back locally (internal loopback)
+  - `MCR[SRXDIS]=0`: self-reception is enabled in normal mode
+  - `MCR[SRXDIS]=1`: self-reception is disabled in normal mode
+  - In loopback mode, frames are not emitted on external `canbusX` links
 - Legacy RX FIFO emulation (`MCR[RFEN]`, `IFLAG1[BUF5I/BUF6I/BUF7I]`, `RXFIR`)
 - Enhanced RX FIFO emulation (`ERFCR`, `ERFIER`, `ERFSR`, output RAM at `0x2000`)
 

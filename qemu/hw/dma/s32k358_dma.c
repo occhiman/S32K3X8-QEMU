@@ -196,174 +196,270 @@ void s32k358_dma_transfer(S32K358DMAState* s, S32K358DMAChannel* ch){
     g_free(buf);
     return;
 }
-/* Those callbacks are made to set the channels registers (all mapped in TCD memory region) */
-static void s32k358_tcd_write (void *opaque, hwaddr addr, uint64_t val, unsigned size){
-    S32K358DMAState* s = S32K358_DMA(opaque);
-    int ch_num = CH_GET_NUM(addr);
-    S32K358DMAChannel* ch = &s->channels[ch_num];
-    #ifdef DEBUG_DMA_TCD
-    switch(CH_GET_REG(addr)){
-        case CH_CSR_OFF:
-        case CH_ES_OFF:
-        case CH_INT_OFF:
-        case CH_SBR_OFF:
-        case CH_PRI_OFF:
-        case CH_TCD_SADDR_OFF:
-        case CH_TCD_NBYTES_MLOFF_OFF:
-        case CH_TCD_DADDR_OFF:
-            DB_PRINT("TCD Write Value: %d at %lx\n",(uint32_t) val,addr);
-            break;
-        case CH_TCD_SOFF_OFF:
-        case CH_TCD_ATTR_OFF:
-        case CH_TCD_DOFF_OFF:
-        case CH_TCD_CITER_ELINK_OFF:
-        case CH_TCD_CSR_OFF:
-        case CH_TCD_BITER_ELINK:
-            DB_PRINT("TCD Write Value: %d at %lx\n",(uint16_t) val,addr);
-            break;
-        case CH_TCD_SLAST_SDA_OFF:
-        case CH_TCD_DLAST_SGA_OFF:
-            DB_PRINT("TCD Write Value: %d at %lx\n",(int32_t) val,addr);
-            break;
-        default:
-            DB_PRINT("Invalid tcd reg. kaboom.\n");
-            break;
-    }
-    #endif
-    switch(CH_GET_REG(addr)){
-        case CH_CSR_OFF:
-        {
-            uint32_t old = ch->CSR;
-            uint32_t w = (uint32_t)val;
+#define EDMA_TCD_CHANNEL_ADDR_SPACE 0x4000U
 
-            /* Keep writable control bits and implement W1C semantics. */
-            old = (old & ~0xFU) | (w & 0xFU);      /* ERQ/EARQ/EEI/EBW */
-            if (w & (1U << 30)) {                  /* DONE is W1C */
-                old &= ~(1U << 30);
-            }
-            ch->CSR = old;
-            break;
-        }
-        case CH_ES_OFF:
-            /* CH_ES is W1C. */
-            ch->ES &= ~((uint32_t)val);
-            break;
-        case CH_INT_OFF:
-            /* CH_INT is W1C. */
-            ch->INT &= ~((uint32_t)val & 0x1U);
-            s32k358_dma_update_channel_irq(s, ch_num);
-            break;
-        case CH_SBR_OFF:
-            ch->SBR=(uint32_t) val;
-            break;
-        case CH_PRI_OFF:
-            ch->PRI=(uint32_t) val;
-            break;
-        case CH_TCD_SADDR_OFF:
-            ch->tcd.SADDR=(uint32_t) val;
-            break;
-        case CH_TCD_SOFF_OFF:
-            ch->tcd.SOFF=(uint16_t) val;
-            break;
-        case CH_TCD_ATTR_OFF:
-            ch->tcd.ATTR=(uint16_t) val;
-            break;
-        case CH_TCD_NBYTES_MLOFF_OFF:
-            ch->tcd.NBYTES=(uint32_t) val;
-            break;
-        case CH_TCD_SLAST_SDA_OFF:
-            ch->tcd.SLAST_SDA=(int32_t) val;
-            break;
-        case CH_TCD_DADDR_OFF:
-            ch->tcd.DADDR=(uint32_t) val;
-            break;
-        case CH_TCD_DOFF_OFF:
-            ch->tcd.DOFF=(uint16_t) val;
-            break;
-        case CH_TCD_CITER_ELINK_OFF:
-            ch->tcd.CITER = (uint16_t) val;
-            break;
-        case CH_TCD_DLAST_SGA_OFF:
-            ch->tcd.DLAST_SGA=(int32_t) val;
-            break;
-        case CH_TCD_CSR_OFF:
-            uint16_t csr_val = (uint16_t) val;
-            ch->tcd.CSR= csr_val;
-            // if(TCDn_CSR[START] = 1) then trigger a DMA software request
-            if(csr_val & 1){
-                DB_PRINT("Requested start for the channel:%ld\n",CH_GET_NUM(addr));
-                s32k358_dma_preemption(s, ch);
-            }
-            break;
-        case CH_TCD_BITER_ELINK:
-            ch->tcd.BITER = (uint16_t) val;
-            break;
-        default:
-            DB_PRINT("Invalid tcd reg. kaboom.\n");
-            break;
+static uint32_t s32k358_tcd_read_word(const S32K358DMAChannel *ch, hwaddr reg_word)
+{
+    switch (reg_word) {
+    case CH_CSR_OFF:
+        return ch->CSR;
+    case CH_ES_OFF:
+        return ch->ES;
+    case CH_INT_OFF:
+        return ch->INT;
+    case CH_SBR_OFF:
+        return ch->SBR;
+    case CH_PRI_OFF:
+        return ch->PRI;
+    case CH_TCD_SADDR_OFF:
+        return ch->tcd.SADDR;
+    case CH_TCD_SOFF_OFF:
+        return ((uint32_t)ch->tcd.ATTR << 16) | ch->tcd.SOFF;
+    case CH_TCD_NBYTES_MLOFF_OFF:
+        return ch->tcd.NBYTES;
+    case CH_TCD_SLAST_SDA_OFF:
+        return (uint32_t)ch->tcd.SLAST_SDA;
+    case CH_TCD_DADDR_OFF:
+        return ch->tcd.DADDR;
+    case CH_TCD_DOFF_OFF:
+        return ((uint32_t)ch->tcd.CITER << 16) | ch->tcd.DOFF;
+    case CH_TCD_DLAST_SGA_OFF:
+        return (uint32_t)ch->tcd.DLAST_SGA;
+    case CH_TCD_CSR_OFF:
+        return ((uint32_t)ch->tcd.BITER << 16) | ch->tcd.CSR;
+    default:
+        /* Reserved / unimplemented offsets read as zero. */
+        return 0;
     }
 }
-static uint64_t s32k358_tcd_read (void *opaque, hwaddr addr, unsigned size){
+
+static void s32k358_tcd_apply_word_write(S32K358DMAState *s,
+                                         int ch_num,
+                                         hwaddr reg_word,
+                                         uint32_t val)
+{
+    S32K358DMAChannel *ch = &s->channels[ch_num];
+
+    switch (reg_word) {
+    case CH_CSR_OFF:
+    {
+        uint32_t old = ch->CSR;
+
+        /* Keep writable control bits and implement W1C semantics. */
+        old = (old & ~0xFU) | (val & 0xFU);      /* ERQ/EARQ/EEI/EBW */
+        if (val & (1U << 30)) {                  /* DONE is W1C */
+            old &= ~(1U << 30);
+        }
+        ch->CSR = old;
+        break;
+    }
+    case CH_ES_OFF:
+        /* CH_ES is W1C. */
+        ch->ES &= ~val;
+        break;
+    case CH_INT_OFF:
+        /* CH_INT is W1C. */
+        ch->INT &= ~(val & 0x1U);
+        s32k358_dma_update_channel_irq(s, ch_num);
+        break;
+    case CH_SBR_OFF:
+        ch->SBR = val;
+        break;
+    case CH_PRI_OFF:
+        ch->PRI = val;
+        break;
+    case CH_TCD_SADDR_OFF:
+        ch->tcd.SADDR = val;
+        break;
+    case CH_TCD_SOFF_OFF:
+        ch->tcd.SOFF = (uint16_t)(val & 0xFFFFU);
+        ch->tcd.ATTR = (uint16_t)((val >> 16) & 0xFFFFU);
+        break;
+    case CH_TCD_NBYTES_MLOFF_OFF:
+        ch->tcd.NBYTES = val;
+        break;
+    case CH_TCD_SLAST_SDA_OFF:
+        ch->tcd.SLAST_SDA = (int32_t)val;
+        break;
+    case CH_TCD_DADDR_OFF:
+        ch->tcd.DADDR = val;
+        break;
+    case CH_TCD_DOFF_OFF:
+        ch->tcd.DOFF = (uint16_t)(val & 0xFFFFU);
+        ch->tcd.CITER = (uint16_t)((val >> 16) & 0xFFFFU);
+        break;
+    case CH_TCD_DLAST_SGA_OFF:
+        ch->tcd.DLAST_SGA = (int32_t)val;
+        break;
+    case CH_TCD_CSR_OFF:
+    {
+        uint16_t old_csr = ch->tcd.CSR;
+
+        ch->tcd.CSR = (uint16_t)(val & 0xFFFFU);
+        ch->tcd.BITER = (uint16_t)((val >> 16) & 0xFFFFU);
+
+        /* START is software trigger, act on 0->1 transitions. */
+        if (((old_csr & 1U) == 0U) && ((ch->tcd.CSR & 1U) != 0U)) {
+            DB_PRINT("Requested start for the channel:%d\n", ch_num);
+            s32k358_dma_preemption(s, ch);
+        }
+        break;
+    }
+    default:
+        /* Reserved / unimplemented offsets ignore writes. */
+        break;
+    }
+}
+
+#define EDMA_TCD0_CHANNEL_BASE 0U
+#define EDMA_TCD0_CHANNEL_COUNT 12U
+#define EDMA_TCD1_CHANNEL_BASE 12U
+#define EDMA_TCD1_CHANNEL_COUNT 20U
+
+static bool s32k358_tcd_decode_addr(hwaddr addr,
+                                    unsigned channel_base,
+                                    unsigned channel_count,
+                                    int *ch_num,
+                                    hwaddr *reg)
+{
+    unsigned local_channel = (unsigned)CH_GET_NUM(addr);
+    unsigned global_channel;
+
+    if (local_channel >= channel_count) {
+        return false;
+    }
+
+    global_channel = channel_base + local_channel;
+    if (global_channel >= S32K358_NUM_DMA_CH) {
+        return false;
+    }
+
+    *ch_num = (int)global_channel;
+    *reg = CH_GET_REG(addr);
+    return true;
+}
+
+/* Those callbacks are made to set the channels registers (all mapped in TCD memory region) */
+static void s32k358_tcd_write_common(void *opaque,
+                                     hwaddr addr,
+                                     uint64_t val,
+                                     unsigned size,
+                                     unsigned channel_base,
+                                     unsigned channel_count)
+{
     S32K358DMAState* s = S32K358_DMA(opaque);
-    S32K358DMAChannel* ch = &s->channels[CH_GET_NUM(addr)];
-    DB_PRINT("TCD Read at channel:%lx reg:%lx\n",CH_GET_NUM(addr), CH_GET_REG(addr));
-    //printf("Read at reg:%x\n",CH_GET_REG(addr));
-    switch(CH_GET_REG(addr)){
-        case CH_CSR_OFF:
-            return ch->CSR;
-        case CH_ES_OFF:
-            return ch->ES;
-        case CH_INT_OFF:
-            return ch->INT;
-        case CH_SBR_OFF:
-            return ch->SBR;
-        case CH_PRI_OFF:
-            return ch->PRI;
-        case CH_TCD_SADDR_OFF:
-            return ch->tcd.SADDR;
-        case CH_TCD_SOFF_OFF:
-            return ch->tcd.SOFF;
-        case CH_TCD_ATTR_OFF:
-            return ch->tcd.ATTR;
-        case CH_TCD_NBYTES_MLOFF_OFF:
-            return ch->tcd.NBYTES;
-        case CH_TCD_SLAST_SDA_OFF:
-            return ch->tcd.SLAST_SDA;
-        case CH_TCD_DADDR_OFF:
-            return ch->tcd.DADDR;
-        case CH_TCD_DOFF_OFF:
-            return ch->tcd.DOFF;
-        case CH_TCD_CITER_ELINK_OFF:
-            return ch->tcd.CITER;
-        case CH_TCD_DLAST_SGA_OFF:
-            return ch->tcd.DLAST_SGA;
-        case CH_TCD_CSR_OFF:
-            return ch->tcd.CSR;
-        case CH_TCD_BITER_ELINK:
-            return ch->tcd.BITER;
-        default:
-            printf("invalid reg");
-            break;
+    int ch_num;
+    hwaddr reg;
+
+    if (!s32k358_tcd_decode_addr(addr, channel_base, channel_count, &ch_num, &reg)) {
+        return;
     }
-    return 0;
+
+    if ((size == 0) || (size > sizeof(uint32_t)) || (reg + size > EDMA_TCD_CHANNEL_ADDR_SPACE)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "s32k358-dma: invalid TCD write reg=0x%" HWADDR_PRIx " size=%u (ch=%d)\n",
+                      reg, size, ch_num);
+        return;
     }
-static const MemoryRegionOps s32k358_tcd_ops = {
-.read = s32k358_tcd_read,
-.write = s32k358_tcd_write,
-.endianness = DEVICE_NATIVE_ENDIAN,
+
+    for (unsigned i = 0; i < size; i++) {
+        hwaddr byte_reg = reg + i;
+        hwaddr reg_word = byte_reg & ~((hwaddr)0x3U);
+        uint32_t word = s32k358_tcd_read_word(&s->channels[ch_num], reg_word);
+        uint32_t shift = (uint32_t)(byte_reg & 0x3U) * 8U;
+        uint32_t byte_val = (uint32_t)((val >> (8U * i)) & 0xFFU);
+
+        word &= ~(0xFFU << shift);
+        word |= (byte_val << shift);
+
+        s32k358_tcd_apply_word_write(s, ch_num, reg_word, word);
+    }
+}
+
+static uint64_t s32k358_tcd_read_common(void *opaque,
+                                        hwaddr addr,
+                                        unsigned size,
+                                        unsigned channel_base,
+                                        unsigned channel_count)
+{
+    S32K358DMAState* s = S32K358_DMA(opaque);
+    int ch_num;
+    hwaddr reg;
+    uint64_t ret = 0;
+
+    if (!s32k358_tcd_decode_addr(addr, channel_base, channel_count, &ch_num, &reg)) {
+        return 0;
+    }
+
+    if ((size == 0) || (size > sizeof(uint32_t)) || (reg + size > EDMA_TCD_CHANNEL_ADDR_SPACE)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "s32k358-dma: invalid TCD read reg=0x%" HWADDR_PRIx " size=%u (ch=%d)\n",
+                      reg, size, ch_num);
+        return 0;
+    }
+
+    for (unsigned i = 0; i < size; i++) {
+        hwaddr byte_reg = reg + i;
+        hwaddr reg_word = byte_reg & ~((hwaddr)0x3U);
+        uint32_t word = s32k358_tcd_read_word(&s->channels[ch_num], reg_word);
+        uint32_t shift = (uint32_t)(byte_reg & 0x3U) * 8U;
+        uint64_t byte_val = (uint64_t)((word >> shift) & 0xFFU);
+
+        ret |= (byte_val << (8U * i));
+    }
+
+    return ret;
+}
+
+static void s32k358_tcd0_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+{
+    s32k358_tcd_write_common(opaque, addr, val, size,
+                             EDMA_TCD0_CHANNEL_BASE,
+                             EDMA_TCD0_CHANNEL_COUNT);
+}
+
+static uint64_t s32k358_tcd0_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return s32k358_tcd_read_common(opaque, addr, size,
+                                   EDMA_TCD0_CHANNEL_BASE,
+                                   EDMA_TCD0_CHANNEL_COUNT);
+}
+
+static void s32k358_tcd1_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+{
+    s32k358_tcd_write_common(opaque, addr, val, size,
+                             EDMA_TCD1_CHANNEL_BASE,
+                             EDMA_TCD1_CHANNEL_COUNT);
+}
+
+static uint64_t s32k358_tcd1_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return s32k358_tcd_read_common(opaque, addr, size,
+                                   EDMA_TCD1_CHANNEL_BASE,
+                                   EDMA_TCD1_CHANNEL_COUNT);
+}
+
+static const MemoryRegionOps s32k358_tcd0_ops = {
+    .read = s32k358_tcd0_read,
+    .write = s32k358_tcd0_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-
+static const MemoryRegionOps s32k358_tcd1_ops = {
+    .read = s32k358_tcd1_read,
+    .write = s32k358_tcd1_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+};
 static void s32k358_dma_init(Object* obj){
     S32K358DMAState* dma = S32K358_DMA(obj);
     SysBusDevice *d = SYS_BUS_DEVICE(obj);
     memory_region_init_io(&dma->registers, obj, &s32k358_dma_ops, dma, "eDMA engine registers", EDMA_REGS_SIZE);
     sysbus_init_mmio(d, &dma->registers);
 
-    memory_region_init_io(&dma->tcd_region[0], obj, &s32k358_tcd_ops, dma, "eDMA TCDs local memory (first part)", EDMA_TCD1_SIZE);
+    memory_region_init_io(&dma->tcd_region[0], obj, &s32k358_tcd0_ops, dma, "eDMA TCDs local memory (first part)", EDMA_TCD1_SIZE);
     sysbus_init_mmio(d, &dma->tcd_region[0]);
 
-    memory_region_init_io(&dma->tcd_region[1], obj, &s32k358_tcd_ops, dma, "eDMA TCDs local memory (second part)", EDMA_TCD2_SIZE);
+    memory_region_init_io(&dma->tcd_region[1], obj, &s32k358_tcd1_ops, dma, "eDMA TCDs local memory (second part)", EDMA_TCD2_SIZE);
     sysbus_init_mmio(d, &dma->tcd_region[1]);
 
     for (int i = 0; i < S32K358_NUM_DMA_CH; i++) {
@@ -434,3 +530,5 @@ static void s32k358_dma_register_types(void)
 }
 
 type_init(s32k358_dma_register_types)
+
+

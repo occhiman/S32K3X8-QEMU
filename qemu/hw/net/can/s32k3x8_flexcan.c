@@ -52,6 +52,7 @@
 #define FLEXCAN_MCR_IDAM_MASK          0x00000300U
 #define FLEXCAN_MCR_IDAM_SHIFT         8
 #define FLEXCAN_MCR_IRMQ_MASK          0x00010000U
+#define FLEXCAN_MCR_SRXDIS_MASK        0x00020000U
 #define FLEXCAN_MCR_LPMACK_MASK        0x00100000U
 #define FLEXCAN_MCR_FRZACK_MASK        0x01000000U
 #define FLEXCAN_MCR_SOFTRST_MASK       0x02000000U
@@ -60,6 +61,7 @@
 #define FLEXCAN_MCR_RFEN_MASK          0x20000000U
 #define FLEXCAN_MCR_FRZ_MASK           0x40000000U
 #define FLEXCAN_MCR_MDIS_MASK          0x80000000U
+#define FLEXCAN_CTRL1_LPB_MASK         0x00001000U
 #define FLEXCAN_CTRL2_RFFN_MASK        0x0f000000U
 #define FLEXCAN_CTRL2_RFFN_SHIFT       24
 
@@ -119,6 +121,10 @@
 
 /* ESR1 is mostly W1C from software perspective. */
 #define FLEXCAN_ESR1_W1C_MASK          0xffffffffU
+
+static ssize_t s32k3x8_flexcan_receive(CanBusClientState *client,
+                                       const qemu_can_frame *frames,
+                                       size_t frames_cnt);
 
 static inline uint32_t flexcan_reg_index(hwaddr addr)
 {
@@ -548,6 +554,19 @@ static inline bool s32k3x8_flexcan_is_running(const S32K3X8FlexCANState *s)
     return !(mcr & FLEXCAN_MCR_MDIS_MASK) && !(mcr & FLEXCAN_MCR_FRZACK_MASK);
 }
 
+static inline bool s32k3x8_flexcan_loopback_enabled(const S32K3X8FlexCANState *s)
+{
+    return (s->regs[flexcan_reg_index(FLEXCAN_CTRL1_OFFSET)] &
+            FLEXCAN_CTRL1_LPB_MASK) != 0U;
+}
+
+static inline bool s32k3x8_flexcan_self_reception_enabled(
+    const S32K3X8FlexCANState *s)
+{
+    return (s->regs[flexcan_reg_index(FLEXCAN_MCR_OFFSET)] &
+            FLEXCAN_MCR_SRXDIS_MASK) == 0U;
+}
+
 static uint32_t s32k3x8_flexcan_mb_mask(const S32K3X8FlexCANState *s,
                                         unsigned mb_idx)
 {
@@ -684,7 +703,12 @@ static void s32k3x8_flexcan_try_tx_mb(S32K3X8FlexCANState *s, unsigned mb_idx)
         frame.data[i] = mb_bytes[flexcan_word_swapped_index(i)];
     }
 
-    if (s->bus_client.bus) {
+    if (s32k3x8_flexcan_loopback_enabled(s) ||
+        s32k3x8_flexcan_self_reception_enabled(s)) {
+        (void)s32k3x8_flexcan_receive(&s->bus_client, &frame, 1);
+    }
+
+    if (!s32k3x8_flexcan_loopback_enabled(s) && s->bus_client.bus) {
         (void)can_bus_client_send(&s->bus_client, &frame, 1);
     }
 
