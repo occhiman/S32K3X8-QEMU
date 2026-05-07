@@ -151,6 +151,10 @@ The model was aligned for MCAL FlexCAN basic flows:
 - `IMASK1`/`IFLAG1` interrupt flow with W1C flag clearing
 - TX complete signaling through MB flags
 - RX delivery from QEMU CAN bus into configured RX-empty mailboxes
+- RX-by-ISR model when legacy RX FIFO/filtering is disabled:
+  - first attempt strict RX MB ID/mask matching
+  - if no match, route to first interrupt-enabled RX-empty MB (`IMASK1`)
+  - final fallback routes to first RX-empty MB
 - Internal self-reception/loopback behavior:
   - `CTRL1[LPB]=1`: transmitted frame is looped back locally (internal loopback)
   - `MCR[SRXDIS]=0`: self-reception is enabled in normal mode
@@ -183,6 +187,7 @@ Use this checklist when setting up `Can_43_FLEXCAN` / `FlexCAN_Ip` controllers f
 - Classic CAN payload path (up to 8 bytes)
 - MB interrupt line `0..31` path
 - No full CAN FD timing/data-path emulation
+- RX-by-ISR fallback (without legacy FIFO) is intentionally permissive to keep MCAL interrupt-driven receive flows running in simulation.
 - Legacy FIFO filter decoding is exact for IDAM format A; IDAM B/C currently use permissive acceptance.
 - Enhanced FIFO filter matching currently uses permissive acceptance (status, queueing, and interrupts are modeled).
 - No error-state/bus-off behavioral fidelity beyond basic register interactions
