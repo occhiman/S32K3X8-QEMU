@@ -36,6 +36,7 @@
 #define FLASH_SIZE              0x00822000
 #define INT_CODE_FLASH0_BASE    0x00400000
 #define INT_CODE_FLASH0_SIZE    0x00200000    // 2 MB 
+#define INT_PFLASH_VECTOR_BASE  0x00490400
 #define INT_CODE_FLASH1_BASE    0x00600000 
 #define INT_CODE_FLASH1_SIZE    0x00200000    // 2 MB 
 #define INT_CODE_FLASH2_BASE    0x00800000
@@ -108,6 +109,36 @@
 #define S32K3_DMAMUX0_BASE       0x40280000U
 #define S32K3_DMAMUX1_BASE       0x40284000U
 
+/* Clocking/power control blocks used by Clock_Ip_Init on S32K344. */
+#define S32K3_FIRC_BASE          0x402D0000U
+#define S32K3_FIRC_SIZE          0x4000U
+#define S32K3_SIRC_BASE          0x402C8000U
+#define S32K3_SIRC_SIZE          0x4000U
+#define S32K3_SXOSC_BASE         0x402CC000U
+#define S32K3_SXOSC_SIZE         0x4000U
+#define S32K3_FXOSC_BASE         0x402D4000U
+#define S32K3_FXOSC_SIZE         0x4000U
+#define S32K3_MC_CGM_BASE        0x402D8000U
+#define S32K3_MC_CGM_SIZE        0x4000U
+#define S32K3_MC_ME_BASE         0x402DC000U
+#define S32K3_MC_ME_SIZE         0x4000U
+#define S32K3_PLL_BASE           0x402E0000U
+#define S32K3_PLL_SIZE           0x4000U
+#define S32K3_CMU_BASE           0x402BC000U
+#define S32K3_CMU_SIZE           0x4000U
+#define S32K3_RTC_BASE           0x40288000U
+#define S32K3_RTC_SIZE           0x4000U
+#define S32K3_MC_RGM_BASE        0x4028C000U
+#define S32K3_MC_RGM_SIZE        0x4000U
+#define S32K3_CONFIGURATION_GPR_BASE 0x4039C000U
+#define S32K3_CONFIGURATION_GPR_SIZE 0x4000U
+#define S32K3_PRAMC0_BASE        0x40264000U
+#define S32K3_PRAMC0_SIZE        0x4000U
+#define S32K3_PRAMC1_BASE        0x40464000U
+#define S32K3_PRAMC1_SIZE        0x4000U
+#define S32K3_FLASH_CTRL_BASE    0x402EC000U
+#define S32K3_FLASH_CTRL_SIZE    0x4000U
+
 /* FlexCAN instances used by this machine: CAN0..CAN7 (S32K358). */
 #define S32K3_FLEXCAN0_BASE      (S32K3_PERIPH_BASE + 0x304000) /* 0x40304000 */
 #define S32K3_FLEXCAN1_BASE      (S32K3_PERIPH_BASE + 0x308000) /* 0x40308000 */
@@ -127,6 +158,25 @@
 #define S32K3_FLEXCAN5_MB_IRQ    124
 #define S32K3_FLEXCAN6_MB_IRQ    126
 #define S32K3_FLEXCAN7_MB_IRQ    128
+
+static bool s32k3x8evb_get_vector_from_int_pflash(Object *obj, Error **errp)
+{
+    return S32K3X8EVB_MACHINE(obj)->vector_from_int_pflash;
+}
+
+static void s32k3x8evb_set_vector_from_int_pflash(Object *obj, bool value,
+                                                   Error **errp)
+{
+    S32K3X8EVB_MACHINE(obj)->vector_from_int_pflash = value;
+}
+
+static uint32_t s32k3x8evb_startup_vector_base(const S32K3X8EVBState *s)
+{
+    if (s->vector_from_int_pflash) {
+        return INT_PFLASH_VECTOR_BASE;
+    }
+    return INT_ITCM_BASE;
+}
 
 /*Memory mapping initialization function*/
 static void s32k3x8_initialize_memory_regions(MemoryRegion *system_memory)
@@ -150,6 +200,20 @@ static void s32k3x8_initialize_memory_regions(MemoryRegion *system_memory)
     MemoryRegion *sram0 = g_new(MemoryRegion, 1);
     MemoryRegion *sram1 = g_new(MemoryRegion, 1);
     MemoryRegion *sram2 = g_new(MemoryRegion, 1);
+    MemoryRegion *firc = g_new(MemoryRegion, 1);
+    MemoryRegion *sirc = g_new(MemoryRegion, 1);
+    MemoryRegion *sxosc = g_new(MemoryRegion, 1);
+    MemoryRegion *fxosc = g_new(MemoryRegion, 1);
+    MemoryRegion *mc_cgm = g_new(MemoryRegion, 1);
+    MemoryRegion *mc_me = g_new(MemoryRegion, 1);
+    MemoryRegion *pll = g_new(MemoryRegion, 1);
+    MemoryRegion *cmu = g_new(MemoryRegion, 1);
+    MemoryRegion *rtc = g_new(MemoryRegion, 1);
+    MemoryRegion *mc_rgm = g_new(MemoryRegion, 1);
+    MemoryRegion *configuration_gpr = g_new(MemoryRegion, 1);
+    MemoryRegion *pramc0 = g_new(MemoryRegion, 1);
+    MemoryRegion *pramc1 = g_new(MemoryRegion, 1);
+    MemoryRegion *flash_ctrl = g_new(MemoryRegion, 1);
       
     /* ITCM init - RAM */
     qemu_log_mask(CPU_LOG_INT, "Initializing ITCM...\n");
@@ -192,6 +256,40 @@ static void s32k3x8_initialize_memory_regions(MemoryRegion *system_memory)
     memory_region_add_subregion(system_memory, INT_SRAM_0_BASE, sram0);
     memory_region_add_subregion(system_memory, INT_SRAM_1_BASE, sram1);
     memory_region_add_subregion(system_memory, INT_SRAM_2_BASE, sram2);
+
+    /*
+     * Stub the clock/power-control address space so Clock_Ip_Init accesses
+     * do not fault while the full register-level models are still pending.
+     */
+    qemu_log_mask(CPU_LOG_INT, "Initializing clock control MMIO stubs...\n");
+    memory_region_init_ram(firc, NULL, "s32k3x8.firc", S32K3_FIRC_SIZE, &error_fatal);
+    memory_region_init_ram(sirc, NULL, "s32k3x8.sirc", S32K3_SIRC_SIZE, &error_fatal);
+    memory_region_init_ram(sxosc, NULL, "s32k3x8.sxosc", S32K3_SXOSC_SIZE, &error_fatal);
+    memory_region_init_ram(fxosc, NULL, "s32k3x8.fxosc", S32K3_FXOSC_SIZE, &error_fatal);
+    memory_region_init_ram(mc_cgm, NULL, "s32k3x8.mc_cgm", S32K3_MC_CGM_SIZE, &error_fatal);
+    memory_region_init_ram(mc_me, NULL, "s32k3x8.mc_me", S32K3_MC_ME_SIZE, &error_fatal);
+    memory_region_init_ram(pll, NULL, "s32k3x8.pll", S32K3_PLL_SIZE, &error_fatal);
+    memory_region_init_ram(cmu, NULL, "s32k3x8.cmu", S32K3_CMU_SIZE, &error_fatal);
+    memory_region_init_ram(rtc, NULL, "s32k3x8.rtc", S32K3_RTC_SIZE, &error_fatal);
+    memory_region_init_ram(mc_rgm, NULL, "s32k3x8.mc_rgm", S32K3_MC_RGM_SIZE, &error_fatal);
+    memory_region_init_ram(configuration_gpr, NULL, "s32k3x8.configuration_gpr", S32K3_CONFIGURATION_GPR_SIZE, &error_fatal);
+    memory_region_init_ram(pramc0, NULL, "s32k3x8.pramc0", S32K3_PRAMC0_SIZE, &error_fatal);
+    memory_region_init_ram(pramc1, NULL, "s32k3x8.pramc1", S32K3_PRAMC1_SIZE, &error_fatal);
+    memory_region_init_ram(flash_ctrl, NULL, "s32k3x8.flash_ctrl", S32K3_FLASH_CTRL_SIZE, &error_fatal);
+    memory_region_add_subregion(system_memory, S32K3_FIRC_BASE, firc);
+    memory_region_add_subregion(system_memory, S32K3_SIRC_BASE, sirc);
+    memory_region_add_subregion(system_memory, S32K3_SXOSC_BASE, sxosc);
+    memory_region_add_subregion(system_memory, S32K3_FXOSC_BASE, fxosc);
+    memory_region_add_subregion(system_memory, S32K3_MC_CGM_BASE, mc_cgm);
+    memory_region_add_subregion(system_memory, S32K3_MC_ME_BASE, mc_me);
+    memory_region_add_subregion(system_memory, S32K3_PLL_BASE, pll);
+    memory_region_add_subregion(system_memory, S32K3_CMU_BASE, cmu);
+    memory_region_add_subregion(system_memory, S32K3_RTC_BASE, rtc);
+    memory_region_add_subregion(system_memory, S32K3_MC_RGM_BASE, mc_rgm);
+    memory_region_add_subregion(system_memory, S32K3_CONFIGURATION_GPR_BASE, configuration_gpr);
+    memory_region_add_subregion(system_memory, S32K3_PRAMC0_BASE, pramc0);
+    memory_region_add_subregion(system_memory, S32K3_PRAMC1_BASE, pramc1);
+    memory_region_add_subregion(system_memory, S32K3_FLASH_CTRL_BASE, flash_ctrl);
     qemu_log_mask(CPU_LOG_INT, "Memory regions initialized successfully.\n");
 
   
@@ -400,6 +498,7 @@ static void s32k3x8evb_init(MachineState *machine)
     S32K3X8EVBState *s = S32K3X8EVB_MACHINE(machine);
     Error *error_local = NULL;
     DeviceState *dev;
+    uint32_t startup_vector_base = s32k3x8evb_startup_vector_base(s);
     
     qemu_log_mask(CPU_LOG_INT, "Initializing S32K3X8EVB board\n");
     
@@ -427,9 +526,14 @@ static void s32k3x8evb_init(MachineState *machine)
     
     /*5. Configure CPU*/
     qdev_prop_set_string(DEVICE(&s->armv7m), "cpu-type", ARM_CPU_TYPE_NAME("cortex-m7"));
-    qdev_prop_set_uint32(DEVICE(&s->armv7m), "init-svtor", INT_ITCM_BASE); // Vector table at address 0 (ITCM)
+    qdev_prop_set_uint32(DEVICE(&s->armv7m), "init-svtor", startup_vector_base);
+    qdev_prop_set_uint32(DEVICE(&s->armv7m), "init-nsvtor", startup_vector_base);
     qdev_prop_set_uint8(DEVICE(&s->armv7m), "num-prio-bits", 4);  // Cortex-M7 uses 4 priority bits
     qdev_prop_set_uint32(DEVICE(&s->armv7m), "num-irq", 240);     // Number of interrupts for S32K3X8
+    qemu_log_mask(CPU_LOG_INT,
+                  "Startup vector base set to 0x%08x (%s)\n",
+                  startup_vector_base,
+                  s->vector_from_int_pflash ? "int_pflash" : "itcm");
     
    
     /*6. Set up system connections*/
@@ -484,6 +588,8 @@ static void s32k3x8evb_instance_init(Object *obj)
 {
     S32K3X8EVBState *s = S32K3X8EVB_MACHINE(obj);
 
+    s->vector_from_int_pflash = false;
+
     object_property_add_link(obj, "canbus0", TYPE_CAN_BUS,
                              (Object **)&s->canbus[0],
                              object_property_allow_set_link,
@@ -522,6 +628,13 @@ static void s32k3x8evb_instance_init(Object *obj)
 static void s32k3x8evb_class_init(ObjectClass *oc, void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
+
+    object_class_property_add_bool(oc, "vector-from-int-pflash",
+                                   s32k3x8evb_get_vector_from_int_pflash,
+                                   s32k3x8evb_set_vector_from_int_pflash);
+    object_class_property_set_description(oc, "vector-from-int-pflash",
+        "Use int_pflash reset vectors at 0x00490400 instead of ITCM vectors at 0x00000000");
+
     mc->desc = "NXP S32K3X8EVB Development Board (Cortex-M7)";
     mc->init = s32k3x8evb_init;
     mc->default_cpus = 1;

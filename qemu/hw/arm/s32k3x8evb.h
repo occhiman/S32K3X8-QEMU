@@ -35,6 +35,7 @@
 typedef struct S32K3X8EVBState {
     MachineState parent_obj;
     ARMv7MState armv7m;
+    bool vector_from_int_pflash;
     DeviceState *uart;
     DeviceState *mscm;
     DeviceState *dma;
