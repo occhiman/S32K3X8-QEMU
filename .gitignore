@@ -7,6 +7,7 @@
 # =============================================
 # QEMU Build Output
 qemu/build/
+qemu/.trash/
 qemu/debug.log
 qemu/qemu.log
 qemu/qemu1.log

@@ -113,6 +113,9 @@
 #define FLEXCAN_IFLAG1_FIFO_MASK       (FLEXCAN_IFLAG1_BUF5I_MASK | \
                                         FLEXCAN_IFLAG1_BUF6I_MASK | \
                                         FLEXCAN_IFLAG1_BUF7I_MASK)
+#define FLEXCAN_TRACE_CAN_INSTANCE     3U
+#define FLEXCAN_TRACE_RX_MB_A          24U
+#define FLEXCAN_TRACE_RX_MB_B          25U
 
 #define FLEXCAN_ERFCR_ERFWM_MASK       0x0000001fU
 #define FLEXCAN_ERFCR_NFE_MASK         0x00003f00U
@@ -648,6 +651,53 @@ static bool s32k3x8_flexcan_enhanced_enqueue(S32K3X8FlexCANState *s,
     return true;
 }
 
+static inline bool s32k3x8_flexcan_trace_enabled(const S32K3X8FlexCANState *s)
+{
+    return s->instance_id == FLEXCAN_TRACE_CAN_INSTANCE;
+}
+
+static inline bool s32k3x8_flexcan_trace_rx_mb(unsigned mb_idx)
+{
+    return (mb_idx == FLEXCAN_TRACE_RX_MB_A) ||
+           (mb_idx == FLEXCAN_TRACE_RX_MB_B);
+}
+
+static uint32_t s32k3x8_flexcan_trace_mb_code(const S32K3X8FlexCANState *s,
+                                              unsigned mb_idx)
+{
+    const uint32_t *mb = flexcan_mb_addr_const(s, mb_idx);
+
+    if (mb == NULL) {
+        return 0xffffffffU;
+    }
+
+    return flexcan_cs_code(mb[0]);
+}
+
+static void s32k3x8_flexcan_trace_irq_state(S32K3X8FlexCANState *s,
+                                            const char *tag,
+                                            uint32_t pending_mb,
+                                            uint32_t pending_erf,
+                                            uint8_t level)
+{
+    if (!s32k3x8_flexcan_trace_enabled(s)) {
+        return;
+    }
+
+    qemu_log_mask(CPU_LOG_INT,
+                  "flexcan%u:%s imask1=0x%08x iflag1=0x%08x pending_mb=0x%08x "
+                  "pending_erf=0x%08x level=%u mb24_code=%u mb25_code=%u\\n",
+                  s->instance_id,
+                  tag,
+                  s->regs[flexcan_reg_index(FLEXCAN_IMASK1_OFFSET)],
+                  s->regs[flexcan_reg_index(FLEXCAN_IFLAG1_OFFSET)],
+                  pending_mb,
+                  pending_erf,
+                  level,
+                  s32k3x8_flexcan_trace_mb_code(s, FLEXCAN_TRACE_RX_MB_A),
+                  s32k3x8_flexcan_trace_mb_code(s, FLEXCAN_TRACE_RX_MB_B));
+}
+
 static void s32k3x8_flexcan_update_irq(S32K3X8FlexCANState *s)
 {
     if (s32k3x8_flexcan_legacy_fifo_enabled(s) && (s->legacy_fifo_count > 0U)) {
@@ -661,6 +711,7 @@ static void s32k3x8_flexcan_update_irq(S32K3X8FlexCANState *s)
                            FLEXCAN_ERFSR_INT_MASK;
     uint8_t level = (pending_mb | pending_erf) != 0U;
 
+    s32k3x8_flexcan_trace_irq_state(s, "irq", pending_mb, pending_erf, level);
     qemu_set_irq(s->irq, level);
 }
 
@@ -687,6 +738,17 @@ static void s32k3x8_flexcan_rearm_rx_mb_from_iflag1(S32K3X8FlexCANState *s,
             cs |= (FLEXCAN_RX_EMPTY << FLEXCAN_CS_CODE_SHIFT) &
                   FLEXCAN_CS_CODE_MASK;
             mb[0] = cs;
+
+            if (s32k3x8_flexcan_trace_enabled(s) &&
+                s32k3x8_flexcan_trace_rx_mb(mb_idx)) {
+                qemu_log_mask(CPU_LOG_INT,
+                              "flexcan%u:rearm_rx mb=%u cleared_mask=0x%08x "
+                              "new_code=%u\\n",
+                              s->instance_id,
+                              mb_idx,
+                              cleared_mask,
+                              flexcan_cs_code(mb[0]));
+            }
         }
     }
 }
@@ -842,6 +904,16 @@ static void s32k3x8_flexcan_store_rx_frame(S32K3X8FlexCANState *s,
                                     s32k3x8_flexcan_mb_payload_size(s, mb_idx));
 
     s->regs[flexcan_reg_index(FLEXCAN_IFLAG1_OFFSET)] |= (1U << mb_idx);
+
+    if (s32k3x8_flexcan_trace_enabled(s) && s32k3x8_flexcan_trace_rx_mb(mb_idx)) {
+        qemu_log_mask(CPU_LOG_INT,
+                      "flexcan%u:store_rx mb=%u iflag1=0x%08x imask1=0x%08x\\n",
+                      s->instance_id,
+                      mb_idx,
+                      s->regs[flexcan_reg_index(FLEXCAN_IFLAG1_OFFSET)],
+                      s->regs[flexcan_reg_index(FLEXCAN_IMASK1_OFFSET)]);
+    }
+
     s32k3x8_flexcan_update_irq(s);
 }
 
@@ -869,16 +941,17 @@ static inline bool s32k3x8_flexcan_mb_irq_enabled(
  * 3) As a final fallback, route to first RX_EMPTY mailbox.
  */
 static bool s32k3x8_flexcan_store_rx_by_isr(S32K3X8FlexCANState *s,
-                                            const qemu_can_frame *frame)
+                                            const qemu_can_frame *frame,
+                                            unsigned start_mb)
 {
-    for (unsigned mb = 0; mb < FLEXCAN_MB_COUNT; mb++) {
+    for (unsigned mb = start_mb; mb < FLEXCAN_MB_COUNT; mb++) {
         if (s32k3x8_flexcan_mb_matches_frame(s, mb, frame)) {
             s32k3x8_flexcan_store_rx_frame(s, mb, frame);
             return true;
         }
     }
 
-    for (unsigned mb = 0; mb < FLEXCAN_MB_COUNT; mb++) {
+    for (unsigned mb = start_mb; mb < FLEXCAN_MB_COUNT; mb++) {
         if (!s32k3x8_flexcan_mb_irq_enabled(s, mb)) {
             continue;
         }
@@ -890,7 +963,7 @@ static bool s32k3x8_flexcan_store_rx_by_isr(S32K3X8FlexCANState *s,
         return true;
     }
 
-    for (unsigned mb = 0; mb < FLEXCAN_MB_COUNT; mb++) {
+    for (unsigned mb = start_mb; mb < FLEXCAN_MB_COUNT; mb++) {
         if (!s32k3x8_flexcan_mb_is_rx_empty(s, mb)) {
             continue;
         }
@@ -1110,9 +1183,28 @@ static void s32k3x8_flexcan_write(void *opaque,
     case FLEXCAN_IMASK2_OFFSET:
     case FLEXCAN_IMASK3_OFFSET:
         s->regs[idx] = v;
+        if ((addr == FLEXCAN_IMASK1_OFFSET) && s32k3x8_flexcan_trace_enabled(s)) {
+            qemu_log_mask(CPU_LOG_INT,
+                          "flexcan%u:imask1_write v=0x%08x iflag1=0x%08x\\n",
+                          s->instance_id,
+                          v,
+                          s->regs[flexcan_reg_index(FLEXCAN_IFLAG1_OFFSET)]);
+        }
         s32k3x8_flexcan_update_irq(s);
         break;
     case FLEXCAN_IFLAG1_OFFSET:
+    {
+        uint32_t iflag1_before = s->regs[idx];
+
+        if (s32k3x8_flexcan_trace_enabled(s)) {
+            qemu_log_mask(CPU_LOG_INT,
+                          "flexcan%u:iflag1_w1c v=0x%08x before=0x%08x imask1=0x%08x\\n",
+                          s->instance_id,
+                          v,
+                          iflag1_before,
+                          s->regs[flexcan_reg_index(FLEXCAN_IMASK1_OFFSET)]);
+        }
+
         if (s32k3x8_flexcan_legacy_fifo_enabled(s) &&
             (v & FLEXCAN_IFLAG1_BUF5I_MASK) &&
             (s->regs[idx] & FLEXCAN_IFLAG1_BUF5I_MASK)) {
@@ -1125,8 +1217,19 @@ static void s32k3x8_flexcan_write(void *opaque,
         if (v & FLEXCAN_IFLAG1_BUF7I_MASK) {
             s->regs[idx] &= ~FLEXCAN_IFLAG1_BUF7I_MASK;
         }
+
+        if (s32k3x8_flexcan_trace_enabled(s)) {
+            qemu_log_mask(CPU_LOG_INT,
+                          "flexcan%u:iflag1_after=0x%08x mb24_code=%u mb25_code=%u\\n",
+                          s->instance_id,
+                          s->regs[idx],
+                          s32k3x8_flexcan_trace_mb_code(s, FLEXCAN_TRACE_RX_MB_A),
+                          s32k3x8_flexcan_trace_mb_code(s, FLEXCAN_TRACE_RX_MB_B));
+        }
+
         s32k3x8_flexcan_update_irq(s);
         break;
+    }
     case FLEXCAN_IFLAG2_OFFSET:
     case FLEXCAN_IFLAG3_OFFSET:
         /* W1C. */
@@ -1231,9 +1334,21 @@ static ssize_t s32k3x8_flexcan_receive(CanBusClientState *client,
         if (s32k3x8_flexcan_enhanced_fifo_enabled(s)) {
             stored = s32k3x8_flexcan_enhanced_enqueue(s, frame);
         } else if (s32k3x8_flexcan_legacy_fifo_enabled(s)) {
-            stored = s32k3x8_flexcan_legacy_enqueue(s, frame);
+            uint16_t idhit = 0U;
+
+            if (s32k3x8_flexcan_legacy_filter_accept(s, frame, &idhit)) {
+                /* Keep native legacy FIFO behavior, including overflow handling. */
+                stored = s32k3x8_flexcan_legacy_enqueue(s, frame);
+            } else {
+                uint32_t occupied_last =
+                    5U + (s32k3x8_flexcan_legacy_filter_count(s) / 4U);
+                unsigned first_mb = (unsigned)(occupied_last + 1U);
+
+                /* On FIFO filter miss, fall back to regular RX MB delivery. */
+                stored = s32k3x8_flexcan_store_rx_by_isr(s, frame, first_mb);
+            }
         } else {
-            stored = s32k3x8_flexcan_store_rx_by_isr(s, frame);
+            stored = s32k3x8_flexcan_store_rx_by_isr(s, frame, 0U);
         }
 
         if (stored) {
