@@ -14,6 +14,7 @@
 #include "hw/dma/s32k358_dma.h"
 #include "hw/dma/s32k358_dmamux.h"
 #include "hw/misc/s32k358_mscm.h"
+#include "hw/misc/unimp.h"
 #include "hw/arm/boot.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-clock.h"
@@ -148,6 +149,16 @@
 #define S32K3_FLEXCAN5_BASE      (S32K3_PERIPH_BASE + 0x318000) /* 0x40318000 */
 #define S32K3_FLEXCAN6_BASE      (S32K3_PERIPH_BASE + 0x31C000) /* 0x4031C000 */
 #define S32K3_FLEXCAN7_BASE      (S32K3_PERIPH_BASE + 0x320000) /* 0x40320000 */
+
+/* SAR ADC instances used by S32K358: ADC0..ADC2. */
+#define S32K3_ADC0_BASE          0x400A0000U
+#define S32K3_ADC1_BASE          0x400A4000U
+#define S32K3_ADC2_BASE          0x400A8000U
+#define S32K3_ADC_MMIO_SIZE      0x4000U
+
+/* SIUL2/SIU2L (System Integration Unit Lite 2) base for S32K358. */
+#define S32K3_SIUL2_BASE         0x40290000U
+#define S32K3_SIUL2_MMIO_SIZE    0x4000U
 
 /* Message Buffer interrupt line 0-31 for CAN0..CAN7. */
 #define S32K3_FLEXCAN0_MB_IRQ    110
@@ -491,6 +502,34 @@ static void s32k3x8_init_flexcan(S32K3X8EVBState *s, ARMv7MState *armv7m)
                   "FlexCAN instances CAN0..CAN7 initialized\n");
 }
 
+static void s32k3x8_init_adc_and_siul2(void)
+{
+    static const hwaddr adc_bases[] = {
+        S32K3_ADC0_BASE,
+        S32K3_ADC1_BASE,
+        S32K3_ADC2_BASE,
+    };
+    static const char *const adc_names[] = {
+        "s32k358.adc0",
+        "s32k358.adc1",
+        "s32k358.adc2",
+    };
+
+    qemu_log_mask(CPU_LOG_INT, "Initializing ADC stubs (ADC0..ADC2)\n");
+    for (int i = 0; i < ARRAY_SIZE(adc_bases); i++) {
+        create_unimplemented_device(adc_names[i],
+                                    adc_bases[i],
+                                    S32K3_ADC_MMIO_SIZE);
+    }
+
+    qemu_log_mask(CPU_LOG_INT, "Initializing SIUL2/SIU2L stub\n");
+    create_unimplemented_device("s32k358.siu2l",
+                                S32K3_SIUL2_BASE,
+                                S32K3_SIUL2_MMIO_SIZE);
+
+    qemu_log_mask(CPU_LOG_INT, "ADC/SIUL2 stubs initialized and mapped\n");
+}
+
 
 /*board_init*/
 static void s32k3x8evb_init(MachineState *machine)
@@ -579,6 +618,8 @@ static void s32k3x8evb_init(MachineState *machine)
     s32k3x8_init_lpspi(s, system_memory, sysclk, &s->armv7m);
     /*16. Initialize FlexCAN devices (instances 0..7)*/
     s32k3x8_init_flexcan(s, &s->armv7m);
+    /*17. Add S32K358 ADC instances and SIUL2 MMIO stubs*/
+    s32k3x8_init_adc_and_siul2();
     qemu_log_mask(CPU_LOG_INT, "S32K3X8EVB board initialization complete\n"); 
 
 
