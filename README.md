@@ -171,6 +171,15 @@
           qemu-system-arm -M s32k3x8evb -nographic -kernel firmware.elf
           ```
 
+  2.  **View QEMU Board Logs (`qemu_log_mask`)**
+      * To see messages logged with `qemu_log_mask(CPU_LOG_INT, ...)`, run QEMU with debug logging enabled:
+          ```bash
+          qemu-system-arm -M s32k3x8evb -nographic -kernel firmware.elf -d int -D qemu.log
+          ```
+      * `-d int` enables `CPU_LOG_INT` messages.
+      * `-D qemu.log` writes logs to `qemu.log`.
+      * If `-D` is omitted, QEMU typically writes to `qemu.log` in the current working directory.
+
   **Expected Output Example:**
   The console should display messages similar to these:
 
