@@ -30,6 +30,8 @@
 #define S32K3X8_LPSPI_COUNT 6
 #define S32K3X8_CAN_COUNT   8
 #define S32K3X8_DMAMUX_COUNT 2
+#define S32K3X8_PIT_COUNT   3
+#define S32K3X8_STM_COUNT   2
 
 // Board state structure 
 typedef struct S32K3X8EVBState {
@@ -39,6 +41,11 @@ typedef struct S32K3X8EVBState {
     DeviceState *uart;
     DeviceState *mscm;
     DeviceState *dma;
+    DeviceState *siul2_port;
+    DeviceState *siul2_icu;
+    DeviceState *pit[S32K3X8_PIT_COUNT];
+    DeviceState *stm[S32K3X8_STM_COUNT];
+    DeviceState *memacc;
     DeviceState *dmamux[S32K3X8_DMAMUX_COUNT];
     DeviceState *lpspi[S32K3X8_LPSPI_COUNT];
     DeviceState *flexcan[S32K3X8_CAN_COUNT];

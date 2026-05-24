@@ -59,3 +59,9 @@ config STELLARIS_GPTM
 
 config AVR_TIMER16
     bool
+
+config S32K358_PIT
+    bool
+
+config S32K358_STM
+    bool

@@ -652,6 +652,12 @@ config S32K3X8_MCU
     select S32K358_DMA
     select S32K358_DMAMUX
     select S32K358_MSCM
+    select S32K358_SIUL2_PORT
+    select S32K358_SIUL2_ICU
+    select S32K358_PIT
+    select S32K358_STM
+    select S32K358_FEE
+    select S32K358_MEMACC
 
 config S32K3X8EVB
     bool 

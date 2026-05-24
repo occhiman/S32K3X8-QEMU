@@ -14,6 +14,11 @@
 #include "hw/dma/s32k358_dma.h"
 #include "hw/dma/s32k358_dmamux.h"
 #include "hw/misc/s32k358_mscm.h"
+#include "hw/misc/s32k358_siul2_port.h"
+#include "hw/misc/s32k358_siul2_icu.h"
+#include "hw/misc/s32k358_memacc.h"
+#include "hw/timer/s32k358_pit.h"
+#include "hw/timer/s32k358_stm.h"
 #include "hw/misc/unimp.h"
 #include "hw/arm/boot.h"
 #include "hw/qdev-properties.h"
@@ -137,7 +142,21 @@
 #define S32K3_PRAMC0_SIZE        0x4000U
 #define S32K3_PRAMC1_BASE        0x40464000U
 #define S32K3_PRAMC1_SIZE        0x4000U
-#define S32K3_FLASH_CTRL_BASE    0x402EC000U
+/*
+ * DCM_GPR is touched by SIUL2 Port user-access setup:
+ * SET_USER_ACCESS_ALLOWED(IP_DCM_GPR_BASE, DCM_PROT_MEM_U32)
+ * -> IP_DCM_GPR_BASE + (0x4 * 0x900) = 0x402AE400.
+ */
+#define S32K3_DCM_GPR_BASE       0x402AC000U
+#define S32K3_DCM_GPR_SIZE       0x4000U
+/*
+ * FLASH control window compatibility:
+ * - Legacy MCAL/RTD firmware in this project uses 0x402EC000.
+ * - Newer RM layouts use the PFLASH0 base at 0x40268000.
+ * Map the model at legacy base and provide an alias at RM base.
+ */
+#define S32K3_FLASH_CTRL_BASE        0x402EC000U
+#define S32K3_FLASH_CTRL_RM12_BASE   0x40268000U
 #define S32K3_FLASH_CTRL_SIZE    0x4000U
 
 /* FlexCAN instances used by this machine: CAN0..CAN7 (S32K358). */
@@ -158,7 +177,40 @@
 
 /* SIUL2/SIU2L (System Integration Unit Lite 2) base for S32K358. */
 #define S32K3_SIUL2_BASE         0x40290000U
-#define S32K3_SIUL2_MMIO_SIZE    0x4000U
+#define S32K3_SIUL2_PORT_BASE    S32K3_SIUL2_BASE
+#define S32K3_SIUL2_PORT_MMIO_SIZE 0x5000U
+#define S32K3_SIUL2_ICU_BASE     S32K3_SIUL2_BASE
+#define S32K3_SIUL2_ICU_MMIO_SIZE 0x100U
+
+/* SIUL2 interrupt lines in NVIC (EIF groups 0..3). */
+#define S32K3_SIUL2_0_IRQ        53
+#define S32K3_SIUL2_1_IRQ        54
+#define S32K3_SIUL2_2_IRQ        55
+#define S32K3_SIUL2_3_IRQ        56
+
+/*
+ * PIT instances used by S32K3x8.
+ * NOTE: base map follows established S32K3 platform layouts.
+ */
+#define S32K3_PIT0_BASE          0x400B0000U
+#define S32K3_PIT1_BASE          0x400B4000U
+#define S32K3_PIT2_BASE          0x402FC000U
+#define S32K3_PIT_MMIO_SIZE      0x4000U
+
+#define S32K3_PIT0_IRQ           96
+#define S32K3_PIT1_IRQ           97
+#define S32K3_PIT2_IRQ           98
+
+/*
+ * STM instances used by S32K3x8.
+ * STM0/STM1 are used by Tmrmgr/Stm_Ip on S32K344-derived firmware.
+ */
+#define S32K3_STM0_BASE          0x40274000U
+#define S32K3_STM1_BASE          0x40474000U
+#define S32K3_STM_MMIO_SIZE      0x4000U
+
+#define S32K3_STM0_IRQ           39
+#define S32K3_STM1_IRQ           40
 
 /* Message Buffer interrupt line 0-31 for CAN0..CAN7. */
 #define S32K3_FLEXCAN0_MB_IRQ    110
@@ -224,7 +276,7 @@ static void s32k3x8_initialize_memory_regions(MemoryRegion *system_memory)
     MemoryRegion *configuration_gpr = g_new(MemoryRegion, 1);
     MemoryRegion *pramc0 = g_new(MemoryRegion, 1);
     MemoryRegion *pramc1 = g_new(MemoryRegion, 1);
-    MemoryRegion *flash_ctrl = g_new(MemoryRegion, 1);
+    MemoryRegion *dcm_gpr = g_new(MemoryRegion, 1);
       
     /* ITCM init - RAM */
     qemu_log_mask(CPU_LOG_INT, "Initializing ITCM...\n");
@@ -286,7 +338,8 @@ static void s32k3x8_initialize_memory_regions(MemoryRegion *system_memory)
     memory_region_init_ram(configuration_gpr, NULL, "s32k3x8.configuration_gpr", S32K3_CONFIGURATION_GPR_SIZE, &error_fatal);
     memory_region_init_ram(pramc0, NULL, "s32k3x8.pramc0", S32K3_PRAMC0_SIZE, &error_fatal);
     memory_region_init_ram(pramc1, NULL, "s32k3x8.pramc1", S32K3_PRAMC1_SIZE, &error_fatal);
-    memory_region_init_ram(flash_ctrl, NULL, "s32k3x8.flash_ctrl", S32K3_FLASH_CTRL_SIZE, &error_fatal);
+    memory_region_init_ram(dcm_gpr, NULL, "s32k3x8.dcm_gpr",
+                           S32K3_DCM_GPR_SIZE, &error_fatal);
     memory_region_add_subregion(system_memory, S32K3_FIRC_BASE, firc);
     memory_region_add_subregion(system_memory, S32K3_SIRC_BASE, sirc);
     memory_region_add_subregion(system_memory, S32K3_SXOSC_BASE, sxosc);
@@ -300,7 +353,7 @@ static void s32k3x8_initialize_memory_regions(MemoryRegion *system_memory)
     memory_region_add_subregion(system_memory, S32K3_CONFIGURATION_GPR_BASE, configuration_gpr);
     memory_region_add_subregion(system_memory, S32K3_PRAMC0_BASE, pramc0);
     memory_region_add_subregion(system_memory, S32K3_PRAMC1_BASE, pramc1);
-    memory_region_add_subregion(system_memory, S32K3_FLASH_CTRL_BASE, flash_ctrl);
+    memory_region_add_subregion(system_memory, S32K3_DCM_GPR_BASE, dcm_gpr);
     qemu_log_mask(CPU_LOG_INT, "Memory regions initialized successfully.\n");
 
   
@@ -502,7 +555,7 @@ static void s32k3x8_init_flexcan(S32K3X8EVBState *s, ARMv7MState *armv7m)
                   "FlexCAN instances CAN0..CAN7 initialized\n");
 }
 
-static void s32k3x8_init_adc_and_siul2(void)
+static void s32k3x8_init_adc_stubs(void)
 {
     static const hwaddr adc_bases[] = {
         S32K3_ADC0_BASE,
@@ -521,13 +574,150 @@ static void s32k3x8_init_adc_and_siul2(void)
                                     adc_bases[i],
                                     S32K3_ADC_MMIO_SIZE);
     }
+}
 
-    qemu_log_mask(CPU_LOG_INT, "Initializing SIUL2/SIU2L stub\n");
-    create_unimplemented_device("s32k358.siu2l",
-                                S32K3_SIUL2_BASE,
-                                S32K3_SIUL2_MMIO_SIZE);
+static void s32k3x8_init_siul2(S32K3X8EVBState *s,
+                               MemoryRegion *system_memory,
+                               ARMv7MState *armv7m)
+{
+    Error *local_err = NULL;
+    DeviceState *dev;
+    MemoryRegion *mr;
 
-    qemu_log_mask(CPU_LOG_INT, "ADC/SIUL2 stubs initialized and mapped\n");
+    qemu_log_mask(CPU_LOG_INT, "Initializing SIUL2 Port model\n");
+    dev = qdev_new(TYPE_S32K358_SIUL2_PORT);
+    s->siul2_port = dev;
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &local_err)) {
+        error_reportf_err(local_err, "Failed to realize SIUL2 Port: ");
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
+    memory_region_add_subregion(system_memory, S32K3_SIUL2_PORT_BASE, mr);
+
+    qemu_log_mask(CPU_LOG_INT, "Initializing SIUL2 ICU model\n");
+    dev = qdev_new(TYPE_S32K358_SIUL2_ICU);
+    s->siul2_icu = dev;
+    local_err = NULL;
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &local_err)) {
+        error_reportf_err(local_err, "Failed to realize SIUL2 ICU: ");
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
+    memory_region_add_subregion_overlap(system_memory, S32K3_SIUL2_ICU_BASE,
+                                        mr, 1);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                       qdev_get_gpio_in(DEVICE(armv7m), S32K3_SIUL2_0_IRQ));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
+                       qdev_get_gpio_in(DEVICE(armv7m), S32K3_SIUL2_1_IRQ));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 2,
+                       qdev_get_gpio_in(DEVICE(armv7m), S32K3_SIUL2_2_IRQ));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 3,
+                       qdev_get_gpio_in(DEVICE(armv7m), S32K3_SIUL2_3_IRQ));
+
+    qemu_log_mask(CPU_LOG_INT,
+                  "SIUL2 Port/ICU initialized and mapped at 0x%08x\n",
+                  (unsigned int)S32K3_SIUL2_BASE);
+}
+
+static void s32k3x8_init_pit(S32K3X8EVBState *s, ARMv7MState *armv7m)
+{
+    static const hwaddr pit_base[S32K3X8_PIT_COUNT] = {
+        S32K3_PIT0_BASE,
+        S32K3_PIT1_BASE,
+        S32K3_PIT2_BASE,
+    };
+    static const int pit_irq[S32K3X8_PIT_COUNT] = {
+        S32K3_PIT0_IRQ,
+        S32K3_PIT1_IRQ,
+        S32K3_PIT2_IRQ,
+    };
+
+    qemu_log_mask(CPU_LOG_INT, "Initializing PIT instances PIT0..PIT2\n");
+
+    for (int i = 0; i < S32K3X8_PIT_COUNT; i++) {
+        Error *local_err = NULL;
+        DeviceState *dev = qdev_new(TYPE_S32K358_PIT);
+
+        s->pit[i] = dev;
+        qdev_prop_set_uint32(dev, "pit-index", (uint32_t)i);
+        if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &local_err)) {
+            error_reportf_err(local_err, "Failed to realize PIT%d: ", i);
+            return;
+        }
+
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, pit_base[i]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                           qdev_get_gpio_in(DEVICE(armv7m), pit_irq[i]));
+    }
+
+    qemu_log_mask(CPU_LOG_INT, "PIT instances initialized and mapped\n");
+}
+
+static void s32k3x8_init_stm(S32K3X8EVBState *s, ARMv7MState *armv7m)
+{
+    static const hwaddr stm_base[S32K3X8_STM_COUNT] = {
+        S32K3_STM0_BASE,
+        S32K3_STM1_BASE,
+    };
+    static const int stm_irq[S32K3X8_STM_COUNT] = {
+        S32K3_STM0_IRQ,
+        S32K3_STM1_IRQ,
+    };
+
+    qemu_log_mask(CPU_LOG_INT, "Initializing STM instances STM0..STM1\n");
+
+    for (int i = 0; i < S32K3X8_STM_COUNT; i++) {
+        Error *local_err = NULL;
+        DeviceState *dev = qdev_new(TYPE_S32K358_STM);
+
+        s->stm[i] = dev;
+        qdev_prop_set_uint32(dev, "stm-index", (uint32_t)i);
+        if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &local_err)) {
+            error_reportf_err(local_err, "Failed to realize STM%d: ", i);
+            return;
+        }
+
+        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, stm_base[i]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                           qdev_get_gpio_in(DEVICE(armv7m), stm_irq[i]));
+    }
+
+    qemu_log_mask(CPU_LOG_INT,
+                  "STM instances initialized and mapped at 0x%08x/0x%08x\n",
+                  (unsigned int)S32K3_STM0_BASE,
+                  (unsigned int)S32K3_STM1_BASE);
+}
+
+static void s32k3x8_init_memacc(S32K3X8EVBState *s, MemoryRegion *system_memory)
+{
+    Error *local_err = NULL;
+    DeviceState *dev = qdev_new(TYPE_S32K358_MEMACC);
+    MemoryRegion *mr;
+    MemoryRegion *rm12_alias;
+
+    s->memacc = dev;
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &local_err)) {
+        error_reportf_err(local_err, "Failed to realize MemAcc: ");
+        return;
+    }
+
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, S32K3_FLASH_CTRL_BASE);
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
+
+    /*
+     * Compatibility alias: keep RM-v12 PFLASH0 window mapped to the same
+     * model state used by legacy 0x402EC000-based firmware.
+     */
+    rm12_alias = g_new(MemoryRegion, 1);
+    memory_region_init_alias(rm12_alias, NULL, "s32k3x8.memacc_rm12_alias",
+                             mr, 0, S32K3_FLASH_CTRL_SIZE);
+    memory_region_add_subregion(system_memory, S32K3_FLASH_CTRL_RM12_BASE,
+                                rm12_alias);
+
+    qemu_log_mask(CPU_LOG_INT,
+                  "MemAcc initialized @ 0x%08x (alias @ 0x%08x)\n",
+                  (unsigned int)S32K3_FLASH_CTRL_BASE,
+                  (unsigned int)S32K3_FLASH_CTRL_RM12_BASE);
 }
 
 
@@ -618,8 +808,16 @@ static void s32k3x8evb_init(MachineState *machine)
     s32k3x8_init_lpspi(s, system_memory, sysclk, &s->armv7m);
     /*16. Initialize FlexCAN devices (instances 0..7)*/
     s32k3x8_init_flexcan(s, &s->armv7m);
-    /*17. Add S32K358 ADC instances and SIUL2 MMIO stubs*/
-    s32k3x8_init_adc_and_siul2();
+    /*17. Add S32K358 ADC stub instances*/
+    s32k3x8_init_adc_stubs();
+    /*18. Initialize SIUL2 Port/ICU models*/
+    s32k3x8_init_siul2(s, system_memory, &s->armv7m);
+    /*19. Initialize PIT0..PIT2 models*/
+    s32k3x8_init_pit(s, &s->armv7m);
+    /*20. Initialize STM0..STM1 models*/
+    s32k3x8_init_stm(s, &s->armv7m);
+    /*21. Initialize MemAcc-facing FLASH control model*/
+    s32k3x8_init_memacc(s, system_memory);
     qemu_log_mask(CPU_LOG_INT, "S32K3X8EVB board initialization complete\n"); 
 
 
