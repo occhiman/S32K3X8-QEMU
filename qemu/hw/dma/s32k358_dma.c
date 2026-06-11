@@ -8,9 +8,11 @@
  * See the COPYING file in the top-level directory.
  */
 #include "hw/dma/s32k358_dma.h"
+#include "hw/ssi/s32k358_spi.h"
 #include "exec/memattrs.h"
+#include "exec/address-spaces.h"
 #define DEBUG_DMA_TCD
-#define S32K358_DMA_DEBUG 0
+#define S32K358_DMA_DEBUG 1
 /* Those callbacks are made to set the registers of the eDMA engine */
 
 #define DB_PRINT_L(lvl, fmt, args...) do { \
@@ -21,10 +23,97 @@
 
 #define DB_PRINT(fmt, args...) DB_PRINT_L(1, fmt, ## args)
 
+static S32K358DMAState *g_s32k358_dma = NULL;
+static const hwaddr g_s32k358_lpspi4_tdr_addr = 0x404BC064U;
+static const hwaddr g_s32k358_lpspi4_rdr_addr = 0x404BC074U;
+
+MemTxResult s32k3x8_lpspi_dma_read(hwaddr addr, uint8_t *buf, uint32_t size);
+MemTxResult s32k3x8_lpspi_dma_write(hwaddr addr, const uint8_t *buf, uint32_t size);
+static const char *dma_handle_rw_error(MemTxResult result);
+
 static inline int s32k358_dma_channel_index(const S32K358DMAState *s,
                                             const S32K358DMAChannel *ch)
 {
     return (int)(ch - &s->channels[0]);
+}
+
+static MemTxResult s32k358_dma_read_source(S32K358DMAState *s,
+                                           hwaddr           addr,
+                                           uint8_t         *buf,
+                                           uint32_t         size)
+{
+    MemTxResult res;
+    uint32_t value = 0U;
+
+    if ((g_s32k358_lpspi4_rdr_addr == addr) && (size <= 4U)) {
+        res = s32k3x8_lpspi_dma_read(addr, buf, size);
+        DB_PRINT("Direct LPSPI4 RDR DMA read addr=0x%08X size=%u -> %s\n",
+                 (uint32_t)addr,
+                 size,
+                 dma_handle_rw_error(res));
+        return res;
+    }
+
+    if ((g_s32k358_lpspi4_rdr_addr == addr) && (size < 4U)) {
+        res = address_space_read(&s->system_as, addr, MEMTXATTRS_UNSPECIFIED, &value, 4U);
+        if (MEMTX_OK == res) {
+            memcpy(buf, &value, size);
+        }
+    } else {
+        res = address_space_read(&s->system_as, addr, MEMTXATTRS_UNSPECIFIED, buf, size);
+    }
+
+    return res;
+}
+
+static MemTxResult s32k358_dma_write_target(S32K358DMAState *s,
+                                            hwaddr           addr,
+                                            const uint8_t   *buf,
+                                            uint32_t         size)
+{
+    MemTxResult res;
+    uint32_t value32 = 0U;
+    bool lpspi_tdr_byte_write;
+
+    if ((g_s32k358_lpspi4_tdr_addr == addr) && (size <= 4U)) {
+        res = s32k3x8_lpspi_dma_write(addr, buf, size);
+        DB_PRINT("Direct LPSPI4 TDR DMA write addr=0x%08X size=%u -> %s\n",
+                 (uint32_t)addr,
+                 size,
+                 dma_handle_rw_error(res));
+        return res;
+    }
+
+    lpspi_tdr_byte_write = ((g_s32k358_lpspi4_tdr_addr == addr) && (size < 4U));
+    if (true == lpspi_tdr_byte_write) {
+        memcpy(&value32, buf, size);
+        buf = (const uint8_t *)&value32;
+        size = 4U;
+    }
+
+    res = address_space_write(&s->system_as, addr, MEMTXATTRS_UNSPECIFIED, buf, size);
+    if ((MEMTX_ACCESS_ERROR == res) && (size <= 4U)) {
+        MemoryRegion *mr;
+        hwaddr local_addr;
+
+        mr = address_space_translate(&s->system_as,
+                                     addr,
+                                     &local_addr,
+                                     NULL,
+                                     true,
+                                     MEMTXATTRS_UNSPECIFIED);
+        if ((NULL != mr) && memory_region_is_ram(mr) == false) {
+            uint64_t value = 0U;
+            memcpy(&value, buf, size);
+            res = memory_region_dispatch_write(mr,
+                                               local_addr,
+                                               value,
+                                               MO_LE | size_memop(size),
+                                               MEMTXATTRS_UNSPECIFIED);
+        }
+    }
+
+    return res;
 }
 
 static void s32k358_dma_update_channel_irq(S32K358DMAState *s, int ch_num)
@@ -37,7 +126,43 @@ static void s32k358_dma_update_channel_irq(S32K358DMAState *s, int ch_num)
         s->reg_int &= ~(1U << ch_num);
     }
 
+    DB_PRINT("IRQ update ch=%d pending=%u reg_int=0x%08X\n",
+             ch_num,
+             pending ? 1U : 0U,
+             s->reg_int);
     qemu_set_irq(s->irq[ch_num], pending ? 1 : 0);
+}
+
+void s32k358_dma_hw_request(uint32_t ch_num)
+{
+    S32K358DMAChannel *ch;
+
+    if ((NULL == g_s32k358_dma) || (S32K358_NUM_DMA_CH <= ch_num)) {
+        return;
+    }
+
+    ch = &g_s32k358_dma->channels[ch_num];
+    DB_PRINT("HW request ch=%d CSR=0x%08X TCD_CSR=0x%04X SADDR=0x%08X DADDR=0x%08X NBYTES=%u CITER=0x%04X BITER=0x%04X\n",
+             (int)ch_num,
+             ch->CSR,
+             ch->tcd.CSR,
+             ch->tcd.SADDR,
+             ch->tcd.DADDR,
+             ch->tcd.NBYTES,
+             ch->tcd.CITER,
+             ch->tcd.BITER);
+    if (0U != (ch->CSR & (1U << 30))) {
+        DB_PRINT("HW request ignored for done channel:%d CSR=0x%08X\n",
+                 (int)ch_num,
+                 ch->CSR);
+        return;
+    }
+    if ((0U != (ch->CSR & 0x1U)) && (0U == (ch->tcd.CSR & 0x1U))) {
+        g_s32k358_dma->reg_hrs |= (1U << ch_num);
+        DB_PRINT("Hardware request start for the channel:%d\n", (int)ch_num);
+        s32k358_dma_preemption(g_s32k358_dma, ch);
+        g_s32k358_dma->reg_hrs &= ~(1U << ch_num);
+    }
 }
 
 static void s32k358_dma_write (void *opaque, hwaddr addr, uint64_t val, unsigned size){
@@ -123,16 +248,27 @@ void s32k358_dma_preemption(S32K358DMAState* s, S32K358DMAChannel* ch){
     return;
 }
 void s32k358_dma_transfer(S32K358DMAState* s, S32K358DMAChannel* ch){
+    bool software_start;
+    bool transfer_complete;
     int16_t linkCh = -1;
     int ch_num = s32k358_dma_channel_index(s, ch);
-    DB_PRINT("---[QEMU] TCD Debug:\n\nSADDR:%d\nDADDR:%d\nCITER:%d\nBITER:%d\nNBYTES:%d\nSOFF:%d\nDOFF:%d\nSLAST:%d\nDLAST:%d\n---\n",ch->tcd.SADDR, ch->tcd.DADDR, ch->tcd.CITER, ch->tcd.BITER, ch->tcd.NBYTES, ch->tcd.SOFF, ch->tcd.DOFF, ch->tcd.SLAST_SDA, ch->tcd.DLAST_SGA);
+    uint32_t minor_bytes;
+    uint32_t transfer_bytes;
+    uint32_t request_iterations;
+    uint32_t src_step;
+    uint32_t dst_step;
+    DB_PRINT("---[QEMU] TCD Debug:\n\nCH:%d\nSADDR:%d\nDADDR:%d\nCITER:%d\nBITER:%d\nNBYTES:%d\nSOFF:%d\nDOFF:%d\nSLAST:%d\nDLAST:%d\n---\n", ch_num, ch->tcd.SADDR, ch->tcd.DADDR, ch->tcd.CITER, ch->tcd.BITER, ch->tcd.NBYTES, ch->tcd.SOFF, ch->tcd.DOFF, ch->tcd.SLAST_SDA, ch->tcd.DLAST_SGA);
+    software_start = ((ch->tcd.CSR & 0x1U) != 0U);
+    transfer_complete = false;
     if ( CH_TCD_GET_ELINK(ch->tcd.CITER) != CH_TCD_GET_ELINK(ch->tcd.BITER) ){
         DB_PRINT("DMA CITER/BITER Configuration error, Aborting...\n");
         return;
     }
     ch->CSR = CH_CSR_SET_DONE(ch->CSR, 0);
-    /* Set TCDn_CSR[ACTIVE] to 0 */
-    ch->tcd.CSR -= 1;
+    if (true == software_start) {
+        /* Clear software START only for software-triggered transfers. */
+        ch->tcd.CSR &= (uint16_t)~0x1U;
+    }
     ch->CSR = CH_CSR_SET_ACTIVE(ch->CSR, 1);
     /* If the ELINK flag is ENABLED */
     if( CH_TCD_GET_ELINK(ch->tcd.CITER) ){
@@ -143,30 +279,52 @@ void s32k358_dma_transfer(S32K358DMAState* s, S32K358DMAChannel* ch){
     else
         ch->tcd.CITER = CH_TCD_GET_CITER(ch->tcd.CITER);
     MemTxResult res;
-    char* buf = g_new0(char, ch->tcd.DOFF);
-    /* Major loop */
-    for(; ch->tcd.CITER > 0; ch->tcd.CITER--){
-        /* Minor loop */
-        for(uint32_t j=0; j < ch->tcd.NBYTES; j+=ch->tcd.DOFF, ch->tcd.DADDR+=ch->tcd.DOFF ){
-            for( uint16_t k=0; k < ch ->tcd.DOFF; k+=ch->tcd.SOFF, ch->tcd.SADDR+=ch->tcd.SOFF ){
-                res = address_space_read(&s->system_as, ch->tcd.SADDR,MEMTXATTRS_UNSPECIFIED, &buf[k], ch->tcd.SOFF);
-                DB_PRINT("Address space read:%s\n", dma_handle_rw_error(res));
-
-            }
-
-            res = address_space_write(&s->system_as, ch->tcd.DADDR,MEMTXATTRS_UNSPECIFIED, buf, ch->tcd.DOFF);
-            DB_PRINT("Address space write:%s\n", dma_handle_rw_error(res));
-
-        }
+    minor_bytes = ch->tcd.NBYTES;
+    transfer_bytes = minor_bytes;
+    src_step = (0U != ch->tcd.SOFF) ? (uint32_t)ch->tcd.SOFF : minor_bytes;
+    dst_step = (0U != ch->tcd.DOFF) ? (uint32_t)ch->tcd.DOFF : minor_bytes;
+    if (0U == transfer_bytes) {
+        transfer_bytes = (src_step > dst_step) ? src_step : dst_step;
+    }
+    if (0U == transfer_bytes) {
+        DB_PRINT("DMA transfer size is zero, Aborting...\n");
+        ch->CSR = CH_CSR_SET_ACTIVE(ch->CSR,0);
+        return;
+    }
+    request_iterations = (true == software_start) ? (uint32_t)ch->tcd.CITER : 1U;
+    char* buf = g_new0(char, transfer_bytes);
+    for (; (request_iterations > 0U) && (ch->tcd.CITER > 0U); request_iterations--) {
+        DB_PRINT("minor start ch=%d SADDR=0x%08X DADDR=0x%08X bytes=%u\n",
+                 ch_num,
+                 ch->tcd.SADDR,
+                 ch->tcd.DADDR,
+                 transfer_bytes);
+        res = s32k358_dma_read_source(s, ch->tcd.SADDR, (uint8_t *)buf, transfer_bytes);
+        DB_PRINT("Address space read:%s\n", dma_handle_rw_error(res));
+        res = s32k358_dma_write_target(s, ch->tcd.DADDR, (const uint8_t *)buf, transfer_bytes);
+        DB_PRINT("Address space write:%s\n", dma_handle_rw_error(res));
+        ch->tcd.SADDR += ch->tcd.SOFF;
+        ch->tcd.DADDR += ch->tcd.DOFF;
+        ch->tcd.CITER--;
 
         if(ch->tcd.BITER > 1 && ch->tcd.CITER == (ch->tcd.BITER / 2) ){
             DB_PRINT("INTHALF Triggered\n");
         }
-        /* Channel linking to another channel, if the major loop is exhausted this mechanism is suppressed in favor of MAJORLINK */
-        if( linkCh >= 0 && (ch->tcd.CITER - 1 == 0) ){
+        if( linkCh >= 0 && (ch->tcd.CITER == 0U) ){
             DB_PRINT("Interrupt request to another channel\n");
         }
     }
+    transfer_complete = (0U == ch->tcd.CITER);
+
+    if (false == transfer_complete) {
+        ch->CSR = CH_CSR_SET_ACTIVE(ch->CSR,0);
+        DB_PRINT("request serviced ch=%d remaining CITER=%u\n",
+                 ch_num,
+                 ch->tcd.CITER);
+        g_free(buf);
+        return;
+    }
+
     /* Linking to another channel defined in MAJORLINKCH via an internal mechanism
      * started by setting up TCDn_CSR[START] to 1 of desired channel */
 
@@ -187,6 +345,10 @@ void s32k358_dma_transfer(S32K358DMAState* s, S32K358DMAChannel* ch){
     ch->CSR = CH_CSR_SET_DONE(ch->CSR,1);
     ch->CSR = CH_CSR_SET_ACTIVE(ch->CSR,0);
     ch->INT = CH_INT_SET_INT(ch->INT,1);
+    DB_PRINT("transfer complete ch=%d INT=0x%08X CSR=0x%08X\n",
+             ch_num,
+             ch->INT,
+             ch->CSR);
     s32k358_dma_update_channel_irq(s, ch_num);
 
     if(CH_TCD_GET_MAJORINT(ch->tcd.CSR)){
@@ -482,6 +644,7 @@ static void s32k358_dma_realize(DeviceState *dev, Error **errp){
     }
 
     s->regprot_gcr = 0x0;
+    g_s32k358_dma = s;
 
     // Create address space from memory region
     address_space_init(&s->system_as, s->system_memory, "eDMA-AddressSpace");

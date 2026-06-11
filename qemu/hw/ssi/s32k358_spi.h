@@ -73,6 +73,9 @@
 /* FIFO size definitions */
 #define LPSPI_FIFO_SIZE         4           /* 4-word FIFO */
 
+#define LPSPI_DER_TDDE          (1U << 0)
+#define LPSPI_DER_RDDE          (1U << 1)
+
 /* Device type definition */
 #define TYPE_S32K3X8_LPSPI      "s32k3x8.lpspi"
 
@@ -117,6 +120,12 @@ typedef struct S32K3X8LPSPIState {
     bool master_mode;
     uint32_t transfer_size;
     uint32_t current_cs;
+    uint32_t instance;
+    bool prev_tdf;
+    bool prev_rdf;
+    bool dma_dispatch_active;
+    bool dma_tx_pending;
+    bool dma_rx_pending;
     
 } S32K3X8LPSPIState;
 
