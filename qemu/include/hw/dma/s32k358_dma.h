@@ -151,6 +151,7 @@ typedef struct S32K358DMAState {
 
 void s32k358_dma_preemption(S32K358DMAState* s, S32K358DMAChannel* ch);
 void s32k358_dma_transfer(S32K358DMAState* s, S32K358DMAChannel* ch);
+void s32k358_dma_hw_request(uint32_t ch_num);
 
 OBJECT_DECLARE_SIMPLE_TYPE(S32K358DMAState, S32K358_DMA)
 #endif

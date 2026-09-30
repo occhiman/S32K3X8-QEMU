@@ -135,6 +135,10 @@ system_ss.add(when: 'CONFIG_ASPEED_SOC', if_true: files(
   'aspeed_sli.c'))
 
 system_ss.add(when: 'CONFIG_S32K358_MSCM', if_true: files('s32k358_mscm.c'))
+system_ss.add(when: 'CONFIG_S32K358_SIUL2_PORT', if_true: files('s32k358_siul2_port.c'))
+system_ss.add(when: 'CONFIG_S32K358_SIUL2_ICU', if_true: files('s32k358_siul2_icu.c'))
+system_ss.add(when: 'CONFIG_S32K358_FEE', if_true: files('s32k358_fee.c'))
+system_ss.add(when: 'CONFIG_S32K358_MEMACC', if_true: files('s32k358_memacc.c'))
 
 system_ss.add(when: 'CONFIG_MSF2', if_true: files('msf2-sysreg.c'))
 system_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('nrf51_rng.c'))

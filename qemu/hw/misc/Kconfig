@@ -155,6 +155,18 @@ config UNIMP
 config S32K358_MSCM
     bool
 
+config S32K358_SIUL2_PORT
+    bool
+
+config S32K358_SIUL2_ICU
+    bool
+
+config S32K358_FEE
+    bool
+
+config S32K358_MEMACC
+    bool
+
 config LED
     bool
 
